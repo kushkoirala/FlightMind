@@ -4,6 +4,10 @@ data/cleaned/
 data/tokenized/
 data/splits/
 
+# Tokenizer output (regenerate with scripts/train_tokenizer.py)
+tokenizer/*.json
+!tokenizer/.gitkeep
+
 # Model checkpoints
 *.pt
 *.bin

@@ -376,7 +376,7 @@ def clean_hf_datasets() -> list[dict]:
         except Exception as e:
             print(f"  [HF aviation] Error: {e}")
 
-    # ATC transcripts - DatasetDict with 'text' column
+    # ATC transcripts - DatasetDict with 'text' column (skip audio columns)
     atc_dir = RAW_DIR / "atc_transcripts"
     if atc_dir.exists():
         for ds_dir in sorted(atc_dir.iterdir()):
@@ -387,6 +387,9 @@ def clean_hf_datasets() -> list[dict]:
                 count = 0
                 for split_name in ds_dict:
                     ds = ds_dict[split_name]
+                    # Remove audio column to avoid decode errors
+                    text_cols = [c for c in ds.column_names if c != "audio"]
+                    ds = ds.select_columns(text_cols)
                     for row in ds:
                         text = row.get("text", "")
                         if not isinstance(text, str) or len(text) < 10:
