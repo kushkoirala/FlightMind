@@ -1,0 +1,22 @@
+# Data Collection
+requests>=2.31
+beautifulsoup4>=4.12
+lxml>=4.9
+trafilatura>=1.6
+pdfplumber>=0.10
+tqdm>=4.66
+huggingface-hub>=0.20
+
+# Data Processing
+datasets>=2.16
+pandas>=2.1
+pyarrow>=14.0
+xxhash>=3.4
+regex>=2023.10
+
+# Tokenizer
+sentencepiece>=0.1.99
+tokenizers>=0.15
+
+# General
+numpy>=1.26

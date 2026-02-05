@@ -1,0 +1,48 @@
+# Data (too large for git)
+data/raw/
+data/cleaned/
+data/tokenized/
+data/splits/
+
+# Model checkpoints
+*.pt
+*.bin
+*.safetensors
+checkpoints/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.eggs/
+dist/
+build/
+*.egg
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log
+wandb/
+runs/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Temp
+*.tmp
+*.bak
+setup_dirs.ps1

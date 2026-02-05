@@ -1,0 +1,184 @@
+# FlightMind Project Configuration
+# ===================================
+
+project:
+  name: FlightMind
+  description: Aviation-native language model built from scratch
+  version: 0.1.0
+
+# Data collection sources and paths
+data:
+  raw_dir: data/raw
+  cleaned_dir: data/cleaned
+  tokenized_dir: data/tokenized
+  splits_dir: data/splits
+
+  sources:
+    faa_handbooks:
+      enabled: true
+      description: "FAA Handbooks (PHAK, AFH, IFH, etc.)"
+      url_base: "https://www.faa.gov/regulations_policies/handbooks_manuals/aviation"
+      output_dir: data/raw/faa_handbooks
+
+    faa_regulations:
+      enabled: true
+      description: "14 CFR from National Archives XML bulk download"
+      url: "https://www.govinfo.gov/bulkdata/CFR/2025/title-14"
+      output_dir: data/raw/faa_regulations
+
+    faa_tcds:
+      enabled: true
+      description: "FAA Type Certificate Data Sheets"
+      url: "https://drs.faa.gov/browse/TCDSMODEL/doctypeDetails"
+      output_dir: data/raw/faa_tcds
+
+    faa_acs:
+      enabled: true
+      description: "FAA Advisory Circulars"
+      url: "https://drs.faa.gov/browse/AC/doctypeDetails"
+      output_dir: data/raw/faa_acs
+
+    faa_ads:
+      enabled: true
+      description: "FAA Airworthiness Directives"
+      url: "https://drs.faa.gov/browse/ADFRAWD/doctypeDetails"
+      output_dir: data/raw/faa_ads
+
+    ntsb:
+      enabled: true
+      description: "NTSB accident reports and narratives"
+      bulk_url: "https://data.ntsb.gov/avdata/FileDirectory/DownloadFile?fileID=C%3A%5Cavdata%5Cavall.zip"
+      full_text_url: "https://zenodo.org/records/17096333"
+      output_dir: data/raw/ntsb
+
+    asrs:
+      enabled: true
+      description: "NASA ASRS voluntary safety reports"
+      url: "https://asrs.arc.nasa.gov/search/database.html"
+      output_dir: data/raw/asrs
+
+    metar:
+      enabled: true
+      description: "Historical METAR/TAF from Iowa Environmental Mesonet"
+      url: "https://mesonet.agron.iastate.edu/request/download.phtml"
+      output_dir: data/raw/metar
+
+    atc_transcripts:
+      enabled: true
+      description: "ATC transcripts from ATCO2 and UWB-ATCC via HuggingFace"
+      datasets:
+        - "Jzuluaga/uwb_atcc"
+        - "Jzuluaga/atco2_corpus_1h"
+        - "jacktol/atc-dataset"
+      output_dir: data/raw/atc_transcripts
+
+    skybrary:
+      enabled: true
+      description: "SKYbrary aviation safety articles"
+      url: "https://skybrary.aero"
+      output_dir: data/raw/skybrary
+
+    nasa_ntrs:
+      enabled: true
+      description: "NASA Technical Reports Server"
+      url: "https://ntrs.nasa.gov/"
+      output_dir: data/raw/nasa_ntrs
+
+    aircraft_performance:
+      enabled: true
+      description: "OpenAP, FAA registry, Kaggle datasets"
+      output_dir: data/raw/aircraft_performance
+
+    wikipedia_aviation:
+      enabled: true
+      description: "Wikipedia aviation articles"
+      output_dir: data/raw/wikipedia_aviation
+
+    intl_accident_reports:
+      enabled: true
+      description: "BEA, AAIB, TSB, ATSB investigation reports"
+      output_dir: data/raw/intl_accident_reports
+
+    military_manuals:
+      enabled: false  # Manual download required
+      description: "Declassified NATOPS, T.O. manuals"
+      output_dir: data/raw/military_manuals
+
+# Tokenizer configuration
+tokenizer:
+  type: bpe
+  vocab_size: 32768
+  min_frequency: 2
+  special_tokens:
+    - "<|endoftext|>"
+    - "<|pad|>"
+    - "<|begin_of_turn|>"
+    - "<|end_of_turn|>"
+    - "<|system|>"
+    - "<|user|>"
+    - "<|assistant|>"
+  output_dir: tokenizer
+
+# Data mixing for pretraining
+mixing:
+  # Ratio of general to aviation data during pretraining
+  general_ratio: 0.70
+  aviation_ratio: 0.30
+  general_dataset: "HuggingFaceFW/fineweb-edu"
+  general_subset: "sample-100BT"
+
+# Model architecture (nanochat-inspired)
+model:
+  # depth controls everything: channels, params, FLOPs
+  # d12 = ~203M, d20 = ~561M, d32 = ~1.75B
+  depth: 20
+  vocab_size: 32768
+  max_seq_len: 2048
+  # Derived from depth (computed at runtime):
+  # n_head, n_embd, n_layer all scale with depth
+
+# Training configuration
+training:
+  # Pretraining
+  pretrain:
+    batch_size_tokens: 524288  # ~512K tokens per step
+    learning_rate: 6.0e-4
+    warmup_steps: 500
+    total_tokens: 50_000_000_000  # 50B tokens target
+    weight_decay: 0.1
+    grad_clip: 1.0
+    checkpoint_every: 1000
+    eval_every: 500
+
+  # Midtraining (SFT stage 1)
+  midtrain:
+    datasets:
+      - name: "SmolTalk"
+        source: "HuggingFaceTB/smoltalk"
+        ratio: 0.50
+      - name: "aviation_instructions"
+        source: "local"
+        ratio: 0.40
+      - name: "task_data"
+        source: "local"
+        ratio: 0.10
+
+  # SFT (stage 2)
+  sft:
+    dataset: "aviation_qa_curated"
+    learning_rate: 1.0e-5
+    epochs: 3
+
+# Hardware profiles
+hardware:
+  local:
+    name: "Dell 7920"
+    cpu: "2x Xeon Gold 5118 (24 cores / 48 threads)"
+    ram_gb: 64
+    gpu: "RTX 4060 8GB"
+    use_for: ["data_collection", "data_processing", "tokenizer", "eval"]
+
+  cloud:
+    name: "8x H100 SXM 80GB"
+    provider: "runpod"  # or vast.ai, lambda
+    use_for: ["pretraining", "midtraining", "sft"]
