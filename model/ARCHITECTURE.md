@@ -8,21 +8,26 @@ Every architectural choice in FlightMind is made deliberately, with preference f
 
 ## Depth Parameterization
 
-The entire model is controlled by a single integer: **depth**.
+The entire model is controlled by a single integer: **depth**. From this scalar, all architectural hyperparameters are deterministically derived, ensuring balanced width-to-depth ratios at every scale.
 
 ```
-depth = 20  ->  FlightMind-d20 (561M parameters)
+depth = 8   ->  FlightMind-d8   (50M parameters)   <-- proof-of-concept (local GPU)
+depth = 20  ->  FlightMind-d20  (566M parameters)
+depth = 24  ->  FlightMind-d24  (956M parameters)   <-- target for AIDA deployment
+depth = 32  ->  FlightMind-d32  (2.2B parameters)   <-- stretch goal
 ```
 
-From depth, everything else is derived:
+| Parameter | Formula | d=8 | d=24 | d=32 |
+|-----------|---------|-----|------|------|
+| n_layer | depth | 8 | 24 | 32 |
+| n_head | depth | 8 | 24 | 32 |
+| head_dim | 64 (fixed) | 64 | 64 | 64 |
+| n_embd | depth * head_dim | 512 | 1536 | 2048 |
+| mlp_hidden | 4 * n_embd | 2048 | 6144 | 8192 |
 
-| Parameter | Formula | d=20 Value |
-|-----------|---------|------------|
-| n_layer | depth | 20 |
-| n_head | depth | 20 |
-| head_dim | 64 (fixed) | 64 |
-| n_embd | depth * head_dim | 1280 |
-| mlp_hidden | 4 * n_embd | 5120 |
+![Architecture Scaling](../docs/figures/architecture_scaling.png)
+
+*Figure: Parameter count and VRAM requirements scale cubically with depth. The RTX 4060 (8 GB) can train up to d12 locally; d20+ requires cloud compute for training but fits comfortably for inference.*
 
 **Why this parameterization?** Inspired by Karpathy's nanochat, this approach has a key advantage: scaling the model up or down requires changing exactly one number. The ratios between components stay optimal at every scale because they're hardcoded into the scaling law.
 

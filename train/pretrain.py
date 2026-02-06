@@ -124,15 +124,28 @@ def get_lr(step: int, warmup_steps: int, max_steps: int, max_lr: float, min_lr: 
 # Training
 # ---------------------------------------------------------------------------
 
+def log(msg, logfile=None):
+    """Print and optionally write to log file (bypasses pipe buffering on Windows)."""
+    print(msg, flush=True)
+    if logfile:
+        logfile.write(msg + "\n")
+        logfile.flush()
+        os.fsync(logfile.fileno())  # Force OS to write to disk immediately
+
+
 def train(args):
     """Main training function."""
-    print("=" * 60)
-    print("FlightMind Pretraining")
-    print("=" * 60)
+    # Open log file for direct disk writes (bypasses pipe buffering)
+    log_path = PROJECT_ROOT / "train.log"
+    logfile = open(log_path, "w", encoding="utf-8")
+
+    log("=" * 60, logfile)
+    log("FlightMind Pretraining", logfile)
+    log("=" * 60, logfile)
 
     device = args.device
     dtype = torch.bfloat16 if device != "cpu" and torch.cuda.is_bf16_supported() else torch.float32
-    print(f"Device: {device}, Dtype: {dtype}")
+    log(f"Device: {device}, Dtype: {dtype}", logfile)
 
     # ---- Model ----
     config = FlightMindConfig(
@@ -140,17 +153,17 @@ def train(args):
         max_seq_len=args.seq_len,
         dropout=0.0,
     )
-    print(f"\n{config.describe()}")
+    log(f"\n{config.describe()}", logfile)
 
     model = FlightMind(config).to(device)
-    print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
+    log(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}", logfile)
 
     # ---- Data ----
     tokenized_dir = PROJECT_ROOT / "data" / "tokenized"
     train_data = PretrainDataset(tokenized_dir / "train.bin", args.seq_len)
     val_data = PretrainDataset(tokenized_dir / "val.bin", args.seq_len)
-    print(f"\nTrain: {len(train_data):,} sequences ({len(train_data) * args.seq_len:,} tokens)")
-    print(f"Val:   {len(val_data):,} sequences ({len(val_data) * args.seq_len:,} tokens)")
+    log(f"\nTrain: {len(train_data):,} sequences ({len(train_data) * args.seq_len:,} tokens)", logfile)
+    log(f"Val:   {len(val_data):,} sequences ({len(val_data) * args.seq_len:,} tokens)", logfile)
 
     # ---- Optimizer ----
     # Separate parameters: apply weight decay only to 2D params (weights),
@@ -165,9 +178,9 @@ def train(args):
     ]
     n_decay = sum(p.numel() for p in decay_params)
     n_nodecay = sum(p.numel() for p in nodecay_params)
-    print(f"\nOptimizer: AdamW (lr={args.lr}, wd={args.weight_decay})")
-    print(f"  Decayed params:    {n_decay:,}")
-    print(f"  Non-decayed params: {n_nodecay:,}")
+    log(f"\nOptimizer: AdamW (lr={args.lr}, wd={args.weight_decay})", logfile)
+    log(f"  Decayed params:    {n_decay:,}", logfile)
+    log(f"  Non-decayed params: {n_nodecay:,}", logfile)
 
     optimizer = torch.optim.AdamW(
         param_groups,
@@ -183,8 +196,8 @@ def train(args):
     tokens_per_micro = args.batch_size * (args.seq_len - 1)  # -1 because target is shifted
     grad_accum_steps = max(1, args.tokens_per_step // (tokens_per_micro * max(1, args.n_gpu)))
     tokens_per_step = tokens_per_micro * grad_accum_steps * max(1, args.n_gpu)
-    print(f"\nGradient accumulation: {grad_accum_steps} steps")
-    print(f"Effective batch: {tokens_per_step:,} tokens/step")
+    log(f"\nGradient accumulation: {grad_accum_steps} steps", logfile)
+    log(f"Effective batch: {tokens_per_step:,} tokens/step", logfile)
 
     # ---- Resume from checkpoint ----
     start_step = 0
@@ -193,12 +206,12 @@ def train(args):
         model.load_state_dict(checkpoint["model"])
         optimizer.load_state_dict(checkpoint["optimizer"])
         start_step = checkpoint["step"] + 1
-        print(f"\nResumed from {args.resume} (step {start_step})")
+        log(f"\nResumed from {args.resume} (step {start_step})", logfile)
 
     # ---- Training loop ----
-    print(f"\nTraining for {args.max_steps:,} steps...")
-    print(f"LR schedule: warmup {args.warmup_steps} steps, cosine decay to {args.min_lr}")
-    print("-" * 60)
+    log(f"\nTraining for {args.max_steps:,} steps...", logfile)
+    log(f"LR schedule: warmup {args.warmup_steps} steps, cosine decay to {args.min_lr}", logfile)
+    log("-" * 60, logfile)
 
     model.train()
     best_val_loss = float("inf")
@@ -242,16 +255,17 @@ def train(args):
         if step % log_interval == 0 or step == args.max_steps - 1:
             elapsed = time.time() - t0
             tokens_per_sec = tokens_processed / elapsed if elapsed > 0 else 0
-            print(
+            log(
                 f"step {step:>6d} | loss {loss_accum:.4f} | "
                 f"lr {lr:.2e} | grad_norm {grad_norm:.2f} | "
-                f"{tokens_per_sec:,.0f} tok/s"
+                f"{tokens_per_sec:,.0f} tok/s",
+                logfile,
             )
 
         # ---- Evaluation ----
         if step > 0 and step % args.eval_every == 0:
             val_loss = evaluate(model, val_data, args.batch_size, device, dtype, args.eval_steps)
-            print(f"  -> val_loss: {val_loss:.4f}")
+            log(f"  -> val_loss: {val_loss:.4f}", logfile)
 
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
@@ -276,9 +290,10 @@ def train(args):
     )
 
     total_time = time.time() - t0
-    print(f"\nTraining complete! {args.max_steps} steps in {total_time:.0f}s")
-    print(f"Best val loss: {best_val_loss:.4f}")
-    print(f"Total tokens processed: {tokens_processed:,}")
+    log(f"\nTraining complete! {args.max_steps} steps in {total_time:.0f}s", logfile)
+    log(f"Best val loss: {best_val_loss:.4f}", logfile)
+    log(f"Total tokens processed: {tokens_processed:,}", logfile)
+    logfile.close()
 
 
 @torch.no_grad()
@@ -321,7 +336,7 @@ def save_checkpoint(model, optimizer, config, step, loss, path):
     }
     torch.save(checkpoint, str(path))
     size_mb = path.stat().st_size / 1e6
-    print(f"  Checkpoint saved: {path.name} ({size_mb:.0f} MB, step {step})")
+    print(f"  Checkpoint saved: {path.name} ({size_mb:.0f} MB, step {step})", flush=True)
 
 
 # ---------------------------------------------------------------------------

@@ -1,0 +1,68 @@
+{
+  "faa_handbooks": {
+    "description": "FAA Handbooks (PHAK, IFH, AWH, etc.)",
+    "documents": 10,
+    "total_chars": 10702297,
+    "estimated_tokens": 2675574,
+    "size_mb": 419.5
+  },
+  "faa_regulations": {
+    "description": "14 CFR Federal Aviation Regulations",
+    "total_chars": 10793639,
+    "estimated_tokens": 2698409,
+    "size_mb": 33.5
+  },
+  "ntsb": {
+    "description": "NTSB Accident Reports & Narratives",
+    "narratives": 565488,
+    "total_chars": 541154106,
+    "estimated_tokens": 135288526,
+    "size_mb": 1048.0
+  },
+  "metar": {
+    "description": "Historical METAR/TAF Weather Observations",
+    "text_files": 1,
+    "total_chars": 132032699,
+    "estimated_tokens": 33008174,
+    "size_mb": 478.2
+  },
+  "atc_transcripts": {
+    "description": "ATC Transcripts (HuggingFace: ATCO2, UWB-ATCC, etc.)",
+    "datasets": 4,
+    "total_chars": 2300228,
+    "estimated_tokens": 575057,
+    "size_mb": 3936.1
+  },
+  "aviation_knowledge_hf": {
+    "description": "Aviation Knowledge (kathleenge/aviation HF dataset)",
+    "total_chars": 59293798,
+    "estimated_tokens": 14823449
+  },
+  "aircraft_performance": {
+    "description": "Aircraft Performance Data (OpenAP, FAA Registry)",
+    "total_chars": 12199624,
+    "estimated_tokens": 3049906,
+    "size_mb": 71.6
+  },
+  "fineweb_edu": {
+    "description": "FineWeb-EDU General Knowledge Sample",
+    "documents": 10000,
+    "total_chars": 47307528,
+    "estimated_tokens": 11826882,
+    "size_mb": 49.7
+  },
+  "wikipedia": {
+    "description": "Wikipedia Aviation Articles",
+    "articles": 9662,
+    "total_chars": 78922455,
+    "estimated_tokens": 19730613,
+    "size_mb": 75.5
+  },
+  "_summary": {
+    "total_chars": 894706374,
+    "estimated_tokens": 223676593,
+    "total_size_mb": 6112.1,
+    "aviation_tokens": 211849711,
+    "general_tokens_local": 11826882
+  }
+}

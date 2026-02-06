@@ -3,6 +3,7 @@ data/raw/
 data/cleaned/
 data/tokenized/
 data/splits/
+data/finetune/
 
 # Tokenizer output (regenerate with scripts/train_tokenizer.py)
 tokenizer/*.json
@@ -50,3 +51,7 @@ runs/
 *.tmp
 *.bak
 setup_dirs.ps1
+check_*.ps1
+count_*.ps1
+list_*.ps1
+rename.ps1
