@@ -14,11 +14,13 @@ A detailed guide to how we train FlightMind from random weights to a functional 
 5. [Learning Rate Schedule](#learning-rate-schedule)
 6. [Gradient Accumulation](#gradient-accumulation)
 7. [Mixed Precision Training](#mixed-precision-training)
-8. [Checkpointing & Resumption](#checkpointing--resumption)
-9. [Evaluation](#evaluation)
-10. [Scaling: From Smoke Test to Full Training](#scaling)
-11. [Common Training Pathologies](#common-training-pathologies)
-12. [Compute Budget](#compute-budget)
+8. [Multi-GPU Training (DDP)](#multi-gpu-training-ddp)
+9. [FineWeb-EDU Streaming](#fineweb-edu-streaming)
+10. [Checkpointing & Resumption](#checkpointing--resumption)
+11. [Evaluation](#evaluation)
+12. [Scaling: From Smoke Test to Full Training](#scaling)
+13. [Common Training Pathologies](#common-training-pathologies)
+14. [Compute Budget](#compute-budget)
 
 ---
 
@@ -72,16 +74,16 @@ This is exactly how GPT-2, LLaMA, and all modern LLMs handle pretraining data.
 ### Data Mixing
 
 We have two pools:
-- **Aviation data** (~89.5M tokens): NTSB reports, FAA handbooks, METARs, regulations, Wikipedia aviation articles, HuggingFace aviation datasets, OpenAP aircraft data
-- **General data** (~10.5M tokens): FineWeb-EDU educational web text
+- **Aviation data** (~108M tokens, stored locally): NTSB reports, FAA handbooks, METARs, regulations, Wikipedia aviation articles, HuggingFace aviation datasets, OpenAP aircraft data
+- **General data** (~1.3T tokens, streamed): FineWeb-EDU educational web text from HuggingFace
 
-We target a 70% general / 30% aviation mix. Why not 100% aviation?
+We target a **70% general / 30% aviation mix**. Why not 100% aviation?
 
 1. **Language foundation**: The model needs to learn English grammar, common phrases, and general world knowledge. A model trained only on METARs would struggle with natural language.
 2. **Transfer learning**: General language ability transfers to aviation understanding. Knowing what "inspection" means in everyday English helps understand "preflight inspection."
 3. **Diversity prevents overfitting**: Pure aviation data would cause the model to memorize patterns rather than learn language.
 
-The actual ratio depends on available data. With 89.5M aviation and 10.5M general tokens, our current split is ~89.5% aviation / 10.5% general — we're limited by general data, not by the ratio target.
+For d8 local training, the ratio was limited by available general data (only a 10K-doc FineWeb sample stored locally, giving ~89.5% aviation / 10.5% general). For d24+ cloud training, we stream FineWeb-EDU directly from HuggingFace, achieving the full 30/70 target ratio. See [FineWeb-EDU Streaming](#fineweb-edu-streaming) for details.
 
 ### Storage Format
 
@@ -284,6 +286,97 @@ PyTorch automatically handles the float32 ↔ bfloat16 conversions. Certain oper
 
 ---
 
+## Multi-GPU Training (DDP)
+
+### Why DDP?
+
+When a model fits in one GPU's VRAM (d24 at ~15 GB, d32 at ~35 GB on 80 GB H100s), **DistributedDataParallel (DDP)** is the simplest and most efficient parallelism strategy. Each GPU holds a full copy of the model and processes different data. After each optimizer step, gradients are synchronized via all-reduce so all copies stay identical.
+
+DDP gives near-linear scaling: 4 GPUs ≈ 4x throughput. This is because the only overhead is the gradient all-reduce, which overlaps with backward computation on modern NCCL implementations.
+
+### How It Works in pretrain.py
+
+The training script auto-detects whether it was launched via `torchrun` (which sets `RANK`, `LOCAL_RANK`, `WORLD_SIZE` environment variables) or plain `python`:
+
+```bash
+# Multi-GPU (DDP mode)
+torchrun --nproc_per_node=4 train/pretrain.py --depth 24
+
+# Single-GPU (backward compatible)
+python train/pretrain.py --depth 24 --device cuda
+```
+
+In DDP mode:
+1. **Each GPU gets a different random seed** (`seed + rank`) so they sample different batches
+2. **The model is wrapped with `DDP(model, device_ids=[local_rank])`** after checkpoint loading
+3. **Gradient accumulation uses `no_sync()`** to avoid redundant all-reduce calls during micro-steps
+4. **Only rank 0** logs, evaluates, and saves checkpoints; other ranks wait at `dist.barrier()`
+
+### The `no_sync()` Optimization
+
+Without `no_sync()`, DDP triggers an all-reduce after every `loss.backward()` call. With 8 micro-steps of gradient accumulation, that's 8 all-reduce operations per optimizer step -- 7 of which are wasted since we only need the final accumulated gradient.
+
+```python
+for micro_step in range(grad_accum_steps):
+    is_last = (micro_step == grad_accum_steps - 1)
+    ctx = nullcontext() if is_last else model.no_sync()
+    with ctx:
+        logits, loss = model(x, y)
+        (loss / grad_accum_steps).backward()
+# All-reduce only happens on the last micro-step
+```
+
+This reduces inter-GPU communication by `grad_accum_steps` times (8x in our case).
+
+### NCCL Pitfalls on Cloud GPUs
+
+NCCL (NVIDIA Collective Communications Library) handles the GPU-to-GPU communication. On cloud providers like Vast.ai, the Docker container environment can block certain NCCL features:
+
+- **NVLS (NVLink Sharp)**: A multicast optimization for NVLink. Not supported in most Docker containers. Causes DDP to hang silently at model initialization. Fix: `NCCL_NVLS_ENABLE=0`.
+- **P2P and IB**: Usually work fine on NVLink-connected GPUs within a single node. Only disable if you see hangs after fixing NVLS.
+
+Diagnosis: Run with `NCCL_DEBUG=INFO` and look for "Connected all trees" followed by a hang at NVLS buffer allocation.
+
+---
+
+## FineWeb-EDU Streaming
+
+### The Problem: Data Repetition
+
+Our local aviation corpus is 108M tokens. Training d24 for 95K steps at 524K tokens/step consumes ~50B token-presentations. Without additional data, the model would see each token ~460 times -- extreme overfitting.
+
+### The Solution: Stream General Data from HuggingFace
+
+Instead of downloading HuggingFace's FineWeb-EDU dataset (1.3T tokens, hundreds of GB), we stream it during training. The `FineWebStreamer` class in `dataloader.py`:
+
+1. Opens a streaming connection to `HuggingFaceFW/fineweb-edu` on HuggingFace Hub
+2. Fetches documents on-demand via HTTP (no full download)
+3. Tokenizes each document with our BPE tokenizer
+4. Packs tokens into 2048-length sequences (same format as local data)
+5. Buffers 256 pre-packed sequences for smooth batch delivery
+
+### Mixed Batching
+
+Each micro-batch is split according to `--aviation-ratio` (default 0.30):
+
+```
+Micro-batch (8 sequences):
+  [aviation_1] [aviation_2] [fineweb_1] [fineweb_2] [fineweb_3] [fineweb_4] [fineweb_5] [fineweb_6]
+  |--- 30% local data ---|  |------------- 70% streamed from HuggingFace -------------|
+```
+
+The two halves are fetched independently and concatenated with `torch.cat()` before the forward pass. From the model's perspective, it's a single batch of 8 sequences -- it doesn't know or care which are aviation and which are general.
+
+### DDP Sharding
+
+In multi-GPU mode, each rank gets a different shard of the FineWeb stream (`ds.shard(num_shards=world_size, index=rank)`). This ensures no two GPUs process the same documents, even though the data is streamed rather than pre-split.
+
+### Performance
+
+FineWeb streaming adds ~5-10% overhead compared to pure local data (175K tok/s vs 185K tok/s on 4x H100), primarily from on-the-fly tokenization. The shuffle buffer (10K documents) takes ~15 seconds to initialize at the start of training. After that, the stream stays well ahead of GPU consumption since the network bandwidth (~500 Mbps) far exceeds the ~100 KB/s of raw text the training loop actually needs.
+
+---
+
 ## Checkpointing & Resumption
 
 ### What We Save
@@ -348,14 +441,23 @@ Purpose: Validate training dynamics on a real model. With d8 (50M params) and 99
 - Should see perplexity drop to ~50-100
 - Takes 4-8 hours on a single RTX 4060
 
-### Full Training (Cloud GPUs, d20)
+### Cloud GPU Training (Vast.ai, d24/d32)
 
-The d20 model (566M params) with 99M tokens is actually undertrained by Chinchilla standards (which recommend ~11B tokens for this model size). But with domain-specific data, we can still get useful results — the model will learn aviation language patterns even if it doesn't fully converge.
+With DDP and FineWeb-EDU streaming, we scale to production model sizes on rented cloud GPUs:
 
-For reference, at our data scale:
-- Chinchilla-optimal model size: ~5M params (way too small to be useful)
-- Our model at 566M: will underfit on data, but learn strong patterns
-- Training compute: ~1e18 FLOPs for 50K steps at 512K tokens/step
+**d24 (956M params) on 4x H100 SXM:**
+- 95K steps, 524K tokens/step = ~50B token-presentations
+- 30% aviation (local, repeated ~140x) + 70% FineWeb-EDU (streamed, never repeated)
+- Throughput: ~175K tok/s → ~3.0 sec/step → ~79 hours wall time
+- Cost: ~$506 on Vast.ai at $6.40/hr (4x H100 SXM)
+- This is near Chinchilla-optimal: 956M params × 20 = ~19B tokens recommended; we're training on ~50B effective tokens for thorough convergence
+
+**d32 (2.2B params) on 4x H100 SXM:**
+- Same 95K steps, 524K tokens/step, but batch_size=4 (higher VRAM per GPU)
+- Estimated ~155 hours → ~$1,240
+- Requires 80GB GPUs (35 GB model + optimizer)
+
+The cloud training workflow is documented in [vastai_setup_guide.md](../docs/vastai_setup_guide.md) with step-by-step instructions, NCCL fixes, and monitoring commands.
 
 ---
 
@@ -396,20 +498,34 @@ Total FLOPs ≈ 6 × P × D
 
 (Factor of 6: ~2× for forward, ~4× for backward. The backward pass is roughly 2× the forward because we compute gradients for both weights and activations.)
 
-For our training:
-- P = 566M parameters
-- D = 99M tokens × (number of epochs implied by total steps)
-- At 512K tokens/step for 50K steps: 25.6B token-presentations
-- Total FLOPs ≈ 6 × 566M × 25.6B ≈ 8.7 × 10¹⁹ ≈ 87 ExaFLOPs
+### d8 (50M params, local)
 
-### GPU-Hours
+- P = 50M, D = 25.6B token-presentations (5K steps × 512K tok/step × ~10 passes over data)
+- Actually limited: 5K steps × 524K = 2.6B token-presentations
+- Total FLOPs ≈ 6 × 50M × 2.6B ≈ 7.8 × 10¹⁷ ≈ 0.78 ExaFLOPs
+- RTX 4060 at ~15 TFLOPS (bf16): ~14.5 hours theoretical, 10.3 hours actual (~71% utilization)
 
-- RTX 4060: ~15 TFLOPS (bf16) → 87e18 / 15e12 / 3600 ≈ 1,611 hours (~67 days)
-- A100: ~312 TFLOPS (bf16) → 87e18 / 312e12 / 3600 ≈ 77 hours (~3.2 days)
-- H100: ~990 TFLOPS (bf16) → 87e18 / 990e12 / 3600 ≈ 24 hours (~1 day)
-- 8×H100: → ~3 hours
+### d24 (956M params, cloud)
 
-These are theoretical maximums (100% utilization). Real-world efficiency is typically 30-50% due to memory bandwidth, data loading, and communication overhead. So multiply by 2-3× for realistic estimates.
+- P = 956M, D = 95K steps × 524K tok/step ≈ 49.8B token-presentations
+- Total FLOPs ≈ 6 × 956M × 49.8B ≈ 2.85 × 10²⁰ ≈ 285 ExaFLOPs
+- 4x H100 SXM at ~990 TFLOPS each: 285e18 / (4 × 990e12) / 3600 ≈ 20 hours theoretical
+- Actual: ~79 hours (~25% utilization -- memory-bound for smaller batch sizes)
+- Cost: ~$506 at $6.40/hr on Vast.ai
+
+### d32 (2.2B params, planned)
+
+- P = 2.21B, D = 95K steps × 524K tok/step ≈ 49.8B token-presentations
+- Total FLOPs ≈ 6 × 2.21B × 49.8B ≈ 6.6 × 10²⁰ ≈ 660 ExaFLOPs
+- 4x H100 SXM: ~155 hours, ~$1,240
+
+### Cost Comparison
+
+| Model | GPU Setup | Wall Time | Total Cost | $/B tokens |
+|-------|-----------|-----------|------------|------------|
+| d8 (50M) | 1x RTX 4060 | 10.3 hrs | ~$0 (local) | -- |
+| d24 (956M) | 4x H100 SXM | ~79 hrs | ~$506 | ~$10.2 |
+| d32 (2.2B) | 4x H100 SXM | ~155 hrs | ~$1,240 | ~$24.9 |
 
 ---
 
@@ -463,9 +579,9 @@ Our fine-tuning dataset comprises 303,173 instruction-response pairs derived fro
 
 | File | Purpose |
 |------|---------|
-| `train/pretrain.py` | Main pretraining loop with AdamW, cosine schedule |
+| `train/pretrain.py` | Main pretraining loop with AdamW, cosine schedule, DDP |
 | `train/finetune.py` | LoRA instruction fine-tuning with loss masking |
-| `train/dataloader.py` | Tokenize JSONL → pack sequences → save binary |
+| `train/dataloader.py` | Tokenize JSONL → pack sequences → save binary; FineWeb-EDU streaming |
 | `train/evaluate.py` | Perplexity measurement and sample generation |
 | `data/tokenized/train.bin` | Packed training sequences (uint16 binary) |
 | `data/tokenized/val.bin` | Packed validation sequences |

@@ -370,7 +370,7 @@ class FlightMind(nn.Module):
     These two matrices are doing conceptually inverse operations.
 
     Weight tying shares the same matrix for both, which:
-    1. Saves 41.9M parameters (7.5% of our 561M model)
+    1. Saves 41.9M parameters (7.4% of our 566M model)
     2. Acts as a regularizer (embedding and output must agree on token geometry)
     3. Empirically works just as well or better than separate matrices
     4. Used in GPT-2, LLaMA, Gemma, and most modern LLMs

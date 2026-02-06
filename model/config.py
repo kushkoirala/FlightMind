@@ -11,12 +11,12 @@ the model up or down by changing one number.
 Depth Scaling Table:
     depth  |  d_model  |  n_layer  |  n_head  |  ~Params
     -------|-----------|-----------|----------|----------
-      8    |    512    |     8     |     8    |   ~95M
-     12    |    768    |    12     |    12    |   ~203M
-     16    |   1024    |    16     |    16    |   ~370M
-     20    |   1280    |    20     |    20    |   ~561M
-     24    |   1536    |    24     |    24    |   ~815M
-     32    |   2048    |    32     |    32    |  ~1.75B
+      8    |    512    |     8     |     8    |   ~50M
+     12    |    768    |    12     |    12    |   ~138M
+     16    |   1024    |    16     |    16    |   ~302M
+     20    |   1280    |    20     |    20    |   ~566M
+     24    |   1536    |    24     |    24    |   ~956M
+     32    |   2048    |    32     |    32    |  ~2.21B
 
 Design Decisions (see ARCHITECTURE.md for full rationale):
 - head_dim fixed at 64 (empirically optimal across model scales)

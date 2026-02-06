@@ -24,7 +24,7 @@ The model architecture is inspired by Andrej Karpathy's [nanochat](https://githu
 
 ## Project Status
 
-**Phase: d8 pretraining complete -- scaling to d24**
+**Phase: d24 cloud pretraining in progress**
 
 | Milestone | Status | Details |
 |-----------|--------|---------|
@@ -32,11 +32,12 @@ The model architecture is inspired by Andrej Karpathy's [nanochat](https://githu
 | Data cleaning pipeline | Done | 157K docs cleaned and validated |
 | Custom BPE tokenizer | Done | 32K vocab trained on aviation + general text |
 | Model architecture | Done | Transformer with RoPE, SwiGLU, RMSNorm, Flash Attention |
-| Training infrastructure | Done | AdamW, cosine LR, gradient accumulation, mixed precision |
+| Training infrastructure | Done | AdamW, cosine LR, grad accumulation, DDP, mixed precision |
 | Evaluation suite | Done | Perplexity, sample generation, domain probing |
-| **d8 pretraining (50M)** | **Done** | **Perplexity 8.12, 71 tok/s generation** |
+| d8 pretraining (50M) | Done | Perplexity 8.12, 71 tok/s generation on RTX 4060 |
 | AIDA fine-tuning data pipeline | Done | 303K instruction pairs from real flights |
-| d24/d32 cloud pretraining | Planned | A100 GPU, ~$50-150 |
+| **d24 cloud pretraining (956M)** | **In Progress** | **4x H100 SXM on Vast.ai, ~$506 est.** |
+| d32 cloud pretraining (2.2B) | Planned | 4-8x H100 SXM, ~$1,240 est. |
 | Instruction fine-tuning | Planned | LoRA on 303K AIDA instruction pairs |
 | AIDA integration | Planned | Drop-in replacement for Llama 8B |
 
@@ -121,14 +122,14 @@ See [ARCHITECTURE.md](model/ARCHITECTURE.md) and [TRAINING.md](train/TRAINING.md
 ### Training Pipeline
 
 ```
-Aviation corpus (192M tokens)
+Aviation corpus (192M tokens, local)  +  FineWeb-EDU (~1.3T tokens, streamed)
   --> BPE tokenize (32K vocab)
-  --> Pack into 2048-token sequences
-  --> Pretrain with next-token prediction (AdamW, cosine LR)
+  --> Pack into 2048-token sequences (30% aviation / 70% general)
+  --> Multi-GPU DDP pretrain on 4x H100 (AdamW, cosine LR, bfloat16)
   --> Evaluate (perplexity + generation)
 
 AIDA flight data (303K instruction pairs)
-  --> Instruction fine-tuning (chat format)
+  --> Instruction fine-tuning (LoRA, chat format)
   --> Evaluate on command parsing accuracy
   --> Deploy to AIDA
 ```
@@ -144,9 +145,11 @@ FlightMind is designed to run inference on the same RTX 4060 that powers AIDA's 
 | d32 | 2.2B | ~5.5 GB | ~60+ | + complex queries |
 | Llama 8B (current) | 8B | ~5 GB (Q4) | ~30 | Overkill for task |
 
-## Training Results (d8, complete)
+## Training Results
 
-FlightMind-d8 (50M params) trained on RTX 4060 with 109M aviation tokens. 5,000 steps, 10.3 hours, 1.31B tokens processed.
+### d8 (50M params) -- Complete
+
+Trained on RTX 4060 with 109M aviation tokens. 5,000 steps, 10.3 hours, 1.31B tokens processed.
 
 <p align="center">
   <img src="docs/figures/training_loss.png" alt="Training Loss Curve" width="700"/>
@@ -173,6 +176,52 @@ For reference, GPT-2 (124M params) achieves perplexity ~29 on general web text. 
   <img src="docs/figures/training_dashboard.png" alt="Training Metrics Dashboard" width="700"/>
 </p>
 
+### d24 (956M params) -- In Progress
+
+Scaling to production size on Vast.ai cloud GPUs. The d24 model is 19x larger than d8, requiring multi-GPU training with DistributedDataParallel (DDP) across NVLink-connected H100s.
+
+**Why d24?** At 956M parameters, FlightMind-d24 sits in the sweet spot between capability and inference cost. It's large enough for reasoning-level tasks (command disambiguation, multi-step flight planning) while staying under 2.5 GB VRAM for inference -- comfortably within the RTX 4060's budget alongside AIDA's other GPU workloads.
+
+#### Cloud Training Specifications
+
+| Parameter | Value | Rationale |
+|-----------|-------|-----------|
+| **Hardware** | 4x NVIDIA H100 80GB SXM (NVLink) | NVLink gives ~900 GB/s GPU-to-GPU bandwidth for fast gradient sync |
+| **Provider** | Vast.ai (on-demand) | Best $/GPU-hr for short-term training; no long-term commitment |
+| **Instance cost** | $6.40/hr ($1.60/GPU/hr) | Competitive on-demand H100 pricing |
+| **Parallelism** | DDP (data parallel, 4-way) | Model fits on one GPU (15 GB); DDP gives near-linear throughput scaling |
+| **Precision** | bfloat16 mixed precision | 2x throughput on H100, no loss scaling needed |
+| **Effective batch** | 524K tokens/step | 8 micro-batches x 8 grad accum steps x 4 GPUs x 2047 tokens |
+| **Learning rate** | 6e-4 peak, cosine decay to 6e-5 | Standard for ~1B models; 500-step linear warmup |
+| **Total steps** | 95,000 | ~50B token-presentations (Chinchilla-optimal for 956M params) |
+| **Data mix** | 30% aviation (local) / 70% FineWeb-EDU (streamed) | Aviation tokens packed locally; general data streamed from HuggingFace |
+| **Throughput** | ~175K tok/s | ~3.0 sec/step across 4 GPUs |
+| **Wall-clock time** | ~79 hours (~3.3 days) | Including FineWeb stream init (~15s) |
+| **Estimated cost** | ~$506 | 79h x $6.40/hr |
+
+#### Data Strategy: Streaming FineWeb-EDU
+
+With only 108M tokens stored locally (aviation corpus), training for 95K steps at 524K tokens/step would repeat the data ~460 times -- far too much repetition. Instead, we stream the general-domain portion (70% of each batch) directly from HuggingFace's FineWeb-EDU dataset (~1.3T tokens of high-quality educational web text).
+
+Each micro-batch is split: **2 sequences from local aviation data + 6 sequences from FineWeb-EDU** = 8 total. The streamer tokenizes and packs documents on-the-fly with the same BPE tokenizer used for the aviation corpus. In DDP mode, each GPU gets a different shard of the stream so no data is duplicated.
+
+#### Multi-GPU Setup: What We Learned
+
+- **NCCL NVLS incompatibility**: Vast.ai Docker containers don't support NCCL's NVLink Sharp (NVLS) multicast feature. DDP hangs silently at `DDP(model, device_ids=[...])` during model initialization. Fix: `NCCL_NVLS_ENABLE=0`. NVLink P2P still works -- only the NVLS optimization is disabled, with no measurable performance impact for sub-2B models.
+- **Gradient accumulation with `no_sync()`**: During the 8 micro-steps of gradient accumulation, only the final micro-step triggers the NCCL all-reduce. This reduces inter-GPU communication by 8x.
+- **Rank-aware I/O**: Only GPU rank 0 logs, evaluates, and saves checkpoints. Other ranks wait at `dist.barrier()` synchronization points.
+
+#### Early Training Progress
+
+| Step | Train Loss | Throughput | Notes |
+|------|-----------|------------|-------|
+| 0 | 10.69 | 164K tok/s | Random initialization |
+| 10 | 8.61 | 172K tok/s | Rapid initial learning |
+| 20 | 8.06 | 175K tok/s | Throughput stabilizing |
+| 30 | 7.81 | 175K tok/s | Steady convergence |
+| 40 | 7.14 | 175K tok/s | Still in LR warmup |
+| 50 | 6.80 | 175K tok/s | Loss dropping well |
+
 ## Quick Start
 
 ```bash
@@ -192,8 +241,11 @@ python train/dataloader.py
 # Train (smoke test on CPU)
 python train/pretrain.py --depth 4 --device cpu --max-steps 100
 
-# Train (GPU)
+# Train (single GPU)
 python train/pretrain.py --depth 8 --device cuda --batch-size 4
+
+# Train (multi-GPU with DDP)
+torchrun --nproc_per_node=4 train/pretrain.py --depth 24 --batch-size 8 --fineweb
 
 # Evaluate
 python train/evaluate.py --checkpoint checkpoints/best.pt --all
@@ -244,6 +296,9 @@ FlightMind/
 |   +-- process/                       # Data cleaning scripts
 |
 |-- docs/
+|   |-- cloud_requirements_d24.md      # d24 cloud training specs
+|   |-- cloud_requirements_d32.md      # d32 cloud training specs
+|   |-- vastai_setup_guide.md          # Vast.ai deployment guide
 |   |-- generate_figures.py            # Chart/figure generation script
 |   +-- figures/                       # Publication-quality figures
 |
@@ -255,8 +310,8 @@ FlightMind/
 
 | Role | Hardware | Notes |
 |------|----------|-------|
-| Data processing + training | Dell 7920 (2x Xeon Gold 5118, 64GB, RTX 4060) | Local development |
-| Large model training | Cloud A100 80GB | d24/d32 pretraining |
+| Data processing + d8 training | Dell 7920 (2x Xeon Gold 5118, 64GB, RTX 4060) | Local development |
+| d24/d32 pretraining | 4x H100 80GB SXM (NVLink) on Vast.ai | Cloud GPU rental, DDP |
 | AIDA inference | Same Dell 7920 + RTX 4060 | FlightMind serves AIDA |
 
 ## Relationship to AIDA
@@ -282,7 +337,10 @@ Together they form a complete autonomous flight system where the pilot speaks na
 This is an educational project. Every design decision is documented:
 
 - [ARCHITECTURE.md](model/ARCHITECTURE.md) -- Model architecture decisions (RoPE, SwiGLU, RMSNorm, Flash Attention, weight tying)
-- [TRAINING.md](train/TRAINING.md) -- Training pipeline (AdamW, LR schedules, gradient accumulation, mixed precision, scaling laws)
+- [TRAINING.md](train/TRAINING.md) -- Training pipeline (AdamW, LR schedules, gradient accumulation, DDP, mixed precision, scaling laws)
+- [Cloud Requirements (d24)](docs/cloud_requirements_d24.md) -- GPU, VRAM, storage, and cost estimates for d24 training
+- [Cloud Requirements (d32)](docs/cloud_requirements_d32.md) -- Same for the larger d32 model
+- [Vast.ai Setup Guide](docs/vastai_setup_guide.md) -- Step-by-step cloud deployment with NCCL fixes and monitoring
 
 ## Acknowledgments
 

@@ -358,6 +358,88 @@ class PretrainDataset:
         return x, y
 
 
+class FineWebStreamer:
+    """Streams FineWeb-EDU from HuggingFace and produces packed token sequences.
+
+    For the general-domain portion of training, we stream from HuggingFace's
+    FineWeb-EDU dataset (~1.3T tokens) instead of storing it locally. Documents
+    are fetched via HTTP, tokenized with our BPE tokenizer, and packed into
+    fixed-length sequences with the same interface as PretrainDataset.
+
+    In multi-GPU (DDP) mode, each rank gets a different shard of the stream
+    so GPUs never see the same documents.
+    """
+
+    def __init__(self, seq_len, rank=0, world_size=1, seed=42, buffer_target=256):
+        from collections import deque
+        from datasets import load_dataset
+
+        self.seq_len = seq_len
+        self._buffer_target = buffer_target
+
+        tokenizer = load_tokenizer()
+        self._tokenizer = tokenizer
+        self._eot_id = tokenizer.token_to_id("<|endoftext|>")
+
+        ds = load_dataset(
+            "HuggingFaceFW/fineweb-edu", split="train", streaming=True
+        )
+        if world_size > 1:
+            ds = ds.shard(num_shards=world_size, index=rank)
+        ds = ds.shuffle(seed=seed + rank, buffer_size=10_000)
+
+        self._iter = iter(ds)
+        self._token_buf = []
+        self._seq_queue = deque()
+        self.tokens_streamed = 0
+
+        self._fill()
+
+    def _fill(self):
+        """Tokenize and pack streamed documents until buffer reaches target."""
+        while len(self._seq_queue) < self._buffer_target:
+            # Fetch tokens from stream
+            while len(self._token_buf) < self.seq_len:
+                try:
+                    doc = next(self._iter)
+                except StopIteration:
+                    return
+                ids = self._tokenizer.encode(doc["text"]).ids
+                self._token_buf.extend(ids)
+                self._token_buf.append(self._eot_id)
+
+            # Pack complete sequences
+            while len(self._token_buf) >= self.seq_len:
+                seq = np.array(self._token_buf[:self.seq_len], dtype=np.uint16)
+                self._token_buf = self._token_buf[self.seq_len:]
+                self._seq_queue.append(seq)
+                self.tokens_streamed += self.seq_len
+
+    def get_batch(self, batch_size, device="cpu"):
+        """Get a batch of (input, target) pairs. Same interface as PretrainDataset."""
+        import torch
+
+        if len(self._seq_queue) < batch_size:
+            self._fill()
+
+        seqs = []
+        for _ in range(batch_size):
+            if not self._seq_queue:
+                self._fill()
+                if not self._seq_queue:
+                    raise RuntimeError("FineWeb-EDU stream exhausted")
+            seqs.append(self._seq_queue.popleft())
+
+        # Trigger refill when buffer gets low
+        if len(self._seq_queue) < self._buffer_target // 2:
+            self._fill()
+
+        batch = np.stack(seqs)
+        x = torch.from_numpy(batch[:, :-1].astype(np.int64)).to(device)
+        y = torch.from_numpy(batch[:, 1:].astype(np.int64)).to(device)
+        return x, y
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Prepare FlightMind training data")
     parser.add_argument("--seq-len", type=int, default=2048)

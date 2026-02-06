@@ -255,8 +255,8 @@ def main():
 
     # Model size implications
     print("  Model sizing (Chinchilla 20:1 rule, aviation data only):")
-    for name, params in [("d8 (88M)", 88e6), ("d12 (184M)", 184e6),
-                         ("d16 (332M)", 332e6), ("d20 (561M)", 561e6)]:
+    for name, params in [("d8 (50M)", 50e6), ("d12 (138M)", 138e6),
+                         ("d16 (302M)", 302e6), ("d20 (566M)", 566e6)]:
         needed = int(params * 20)
         have_pct = min(100, (aviation_tokens / needed) * 100)
         print(f"    {name}: needs {needed / 1e9:.1f}B tokens, have {have_pct:.1f}% for aviation midtraining")

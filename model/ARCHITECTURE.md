@@ -126,7 +126,7 @@ x = x + MLP(RMSNorm(x))
 
 **What:** All Linear layers use `bias=False`.
 
-**Why:** Following LLaMA's finding that bias terms in transformers contribute negligibly to quality but add parameters and implementation complexity. For our 561M model, removing all biases saves about 0.2M parameters - small but nonzero, and the code is cleaner.
+**Why:** Following LLaMA's finding that bias terms in transformers contribute negligibly to quality but add parameters and implementation complexity. For our 566M model, removing all biases saves about 0.2M parameters - small but nonzero, and the code is cleaner.
 
 **Exception:** If we were using LayerNorm (which we're not), we'd want a bias (beta) term. RMSNorm only has a scale parameter (gamma).
 
@@ -151,24 +151,24 @@ For FlightMind-d20 (depth=20, n_embd=1280):
 | Attention (Q,K,V,O) x 20 | 131.1M | 23.3% |
 | MLP (gate,up,down) x 20 | 393.2M | 70.0% |
 | RMSNorm x 41 | 52.5K | <0.01% |
-| **Total (with weight tying)** | **~561M** | **100%** |
+| **Total (with weight tying)** | **~566M** | **100%** |
 
 Note: The MLP dominates at 70% of parameters. This is typical for SwiGLU models and is by design - the MLP is where the model stores "knowledge" (factual associations), while attention handles "routing" (which tokens to combine).
 
 ## Scaling Considerations
 
-### Why 561M?
+### Why 566M?
 
 Chinchilla scaling laws (Hoffmann et al., 2022) suggest that for compute-optimal training:
 - **Optimal tokens ≈ 20 * parameters**
-- For 561M params: ~11.2B tokens optimal
+- For 566M params: ~11.3B tokens optimal
 
 Our training budget:
 - Aviation data: ~200M tokens (collected)
 - General data: ~50B tokens (FineWeb-EDU, streamed)
 - Target: 50B total tokens
 
-This puts us in an *over-trained* regime (50B tokens / 561M params = 89x ratio). This is intentional and follows the LLaMA philosophy: slightly smaller models trained on more data perform better at inference time than larger models trained on less data. The extra training cost is paid once; the smaller model size saves on every inference.
+This puts us in an *over-trained* regime (50B tokens / 566M params = 88x ratio). This is intentional and follows the LLaMA philosophy: slightly smaller models trained on more data perform better at inference time than larger models trained on less data. The extra training cost is paid once; the smaller model size saves on every inference.
 
 ### Depth vs Width
 
@@ -181,7 +181,7 @@ With our depth parameterization, making the model wider also makes it deeper (an
 
 | Technique | Why we skipped it |
 |-----------|-------------------|
-| Grouped-Query Attention (GQA) | GQA saves memory at inference by sharing K/V heads. At 561M params, our KV cache is small enough that this isn't needed. GQA shines at 7B+. |
+| Grouped-Query Attention (GQA) | GQA saves memory at inference by sharing K/V heads. At 566M params, our KV cache is small enough that this isn't needed. GQA shines at 7B+. |
 | Mixture of Experts (MoE) | MoE is complex to implement and debug. Not worth it for our scale. |
 | Sliding window attention | Our max_seq_len is 2048, well within full attention's O(T^2) budget. Sliding window helps at 8K+ context. |
 | ALiBi / other position schemes | RoPE is the most widely validated position encoding. ALiBi trades some quality for simpler implementation. |

@@ -130,7 +130,7 @@ mixing:
 # Model architecture (nanochat-inspired)
 model:
   # depth controls everything: channels, params, FLOPs
-  # d12 = ~203M, d20 = ~561M, d32 = ~1.75B
+  # d12 = ~138M, d20 = ~566M, d32 = ~2.21B
   depth: 20
   vocab_size: 32768
   max_seq_len: 2048
