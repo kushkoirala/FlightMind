@@ -24,7 +24,7 @@ The model architecture is inspired by Andrej Karpathy's [nanochat](https://githu
 
 ## Project Status
 
-**Phase: Pretraining** on local RTX 4060
+**Phase: d8 pretraining complete -- scaling to d24**
 
 | Milestone | Status | Details |
 |-----------|--------|---------|
@@ -34,10 +34,10 @@ The model architecture is inspired by Andrej Karpathy's [nanochat](https://githu
 | Model architecture | Done | Transformer with RoPE, SwiGLU, RMSNorm, Flash Attention |
 | Training infrastructure | Done | AdamW, cosine LR, gradient accumulation, mixed precision |
 | Evaluation suite | Done | Perplexity, sample generation, domain probing |
-| **d8 pretraining (50M)** | **In progress** | Loss 2.27, val_loss 2.53, perplexity ~12.6 |
+| **d8 pretraining (50M)** | **Done** | **Perplexity 8.12, 71 tok/s generation** |
 | AIDA fine-tuning data pipeline | Done | 303K instruction pairs from real flights |
 | d24/d32 cloud pretraining | Planned | A100 GPU, ~$50-150 |
-| Instruction fine-tuning | Planned | AIDA command parsing, status narration |
+| Instruction fine-tuning | Planned | LoRA on 303K AIDA instruction pairs |
 | AIDA integration | Planned | Drop-in replacement for Llama 8B |
 
 ## The Closed-Loop Data Pipeline
@@ -144,9 +144,9 @@ FlightMind is designed to run inference on the same RTX 4060 that powers AIDA's 
 | d32 | 2.2B | ~5.5 GB | ~60+ | + complex queries |
 | Llama 8B (current) | 8B | ~5 GB (Q4) | ~30 | Overkill for task |
 
-## Training Results (d8, in progress)
+## Training Results (d8, complete)
 
-First training run: FlightMind-d8 (50M params) on RTX 4060 with 109M tokens.
+FlightMind-d8 (50M params) trained on RTX 4060 with 109M aviation tokens. 5,000 steps, 10.3 hours, 1.31B tokens processed.
 
 <p align="center">
   <img src="docs/figures/training_loss.png" alt="Training Loss Curve" width="700"/>
@@ -157,9 +157,17 @@ First training run: FlightMind-d8 (50M params) on RTX 4060 with 109M tokens.
 | 0 | 10.45 | -- | 34,600 | Random initialization |
 | 250 | 3.53 | 3.42 | 30.4 | Learning basic patterns |
 | 500 | 2.51 | 3.01 | 20.2 | Coherent text emerging |
-| 750 | 2.27 | **2.53** | **12.6** | Good for 50M model |
+| 1,000 | 2.08 | 2.42 | 11.2 | Beating GPT-2 (124M) on domain text |
+| 2,000 | 1.88 | 2.07 | 7.9 | Strong aviation vocabulary |
+| **3,500** | **1.75** | **1.95** | **7.0** | **Best checkpoint (early stopping)** |
+| 5,000 | 1.60 | 2.19 | 8.9 | Overfitting (val loss rising) |
 
-Training at ~34.8K tok/s, GPU 64C stable. For reference, GPT-2 (124M) achieves perplexity ~29 on OpenWebText -- our smaller model is already below that on domain-specific text.
+**Final evaluation on best checkpoint (step 3,500):**
+- **Perplexity: 8.12** (100-batch evaluation, 1.08M tokens)
+- **Generation speed: 71.4 tok/s** on RTX 4060
+- Loss range across batches: [1.07, 2.81] -- low on structured data (METARs), higher on narrative (NTSB reports)
+
+For reference, GPT-2 (124M params) achieves perplexity ~29 on general web text. Our 50M model achieves **8.12** on aviation text -- less than half the parameters, a quarter the perplexity. Domain specialization works.
 
 <p align="center">
   <img src="docs/figures/training_dashboard.png" alt="Training Metrics Dashboard" width="700"/>
