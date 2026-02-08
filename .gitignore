@@ -55,3 +55,7 @@ check_*.ps1
 count_*.ps1
 list_*.ps1
 rename.ps1
+
+# Portable flight gen output and archives
+flightgen-portable.zip
+flightgen-portable/output/

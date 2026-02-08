@@ -38,7 +38,7 @@ The model architecture is inspired by Andrej Karpathy's [nanochat](https://githu
 | AIDA fine-tuning data pipeline | Done | 303K instruction pairs from real flights |
 | d24 cloud pretraining (956M) | Done | 4x H100 SXM on Vast.ai, best val_loss 1.827 at step 4,000 |
 | **Instruction fine-tuning (LoRA)** | **In Progress** | **Rank-16 LoRA on RTX 4060, 13.6M trainable params** |
-| **Synthetic flight data generation** | **In Progress** | **5,000 AIDA flights, ~25M tokens, 5 narrative styles** |
+| **Synthetic flight data generation** | **In Progress** | **50,000 AIDA flights across 3 machines, ~250M tokens, 5 narrative styles** |
 | d32 cloud pretraining (2.2B) | Planned | 4-8x H100 SXM, ~$1,240 est. |
 | AIDA integration | Planned | Drop-in replacement for Llama 8B |
 
@@ -139,9 +139,9 @@ AIDA flight data (303K instruction pairs)
   --> Evaluate on command parsing accuracy
   --> Deploy to AIDA
 
-AIDA flight simulator (5,000 headless flights)
+AIDA flight simulator (50,000 headless flights, 3 machines)
   --> 5 narrative styles per flight  <-- IN PROGRESS
-  --> ~25M new tokens of physics-grounded aviation text
+  --> ~250M new tokens of physics-grounded aviation text
   --> Re-tokenize and integrate into pretraining corpus
 ```
 
@@ -295,6 +295,7 @@ With the pretrained d24 checkpoint (val_loss 1.827), we moved to instruction fin
 | **Batch size** | 2 (effective 4 with grad_accum=2) | VRAM-limited |
 | **Learning rate** | 2e-4, cosine decay to 2e-5 | 100-step warmup |
 | **Max steps** | 2,000 | ~20 hours on RTX 4060 |
+| **Resume support** | `--resume <checkpoint>` | Restores LoRA weights + optimizer state from any saved step |
 | **Sequence length** | 512 tokens | Instruction pairs are short |
 | **Loss masking** | Assistant tokens only | Only learn to generate responses, not repeat prompts |
 
@@ -331,7 +332,7 @@ The overfitting analysis pointed to limited data diversity as a contributing fac
 
 #### Approach
 
-5,000 headless flights are simulated across 11 Kansas airports (90 possible origin/destination pairs) using AIDA's `FlightSimulator` and `GeneralizedXCController`. Each flight uses randomized parameters:
+50,000 headless flights are simulated across 11 Kansas airports (90 possible origin/destination pairs) using AIDA's CPU-only 6-DOF physics engine (RK4 integration at 50 Hz) and `GeneralizedXCController`. Each flight uses randomized parameters:
 
 - **Cruise altitude**: 3,000-8,000 ft in 500 ft increments
 - **Wind**: Random heading (0-360) + speed (0-25 kts)
@@ -350,16 +351,33 @@ Each completed flight is then converted into **5 narrative styles**:
 
 **Key advantage:** The text is **physics-grounded** -- altitudes, airspeeds, headings, and distances come from actual simulated flight dynamics, not hallucinated by a language model. Every number in the generated text corresponds to a real computed value.
 
+#### Portable Flight Generator
+
+The flight simulation code was extracted into a **self-contained portable package** (`flightgen-portable/`) that runs on any machine with Python 3.9+ and NumPy -- no GPU, no CUDA, no special dependencies. This enables distributed generation across heterogeneous hardware.
+
+See [`flightgen-portable/README.md`](flightgen-portable/README.md) for package documentation.
+
+#### Distributed Generation
+
+Flight generation runs across 3 machines in parallel using `--machine-id` for unique seed ranges so output files never collide:
+
+| Machine | ID | CPU | Workers | Flights | Status |
+|---------|------|-----|---------|---------|--------|
+| Dell 7920 | 0 | 2x Xeon Gold 5118 (48 threads) | 38 | 20,000 | In Progress |
+| ROG Ally X | 2 | AMD Ryzen Z2 Extreme (16 threads) | 14 | 15,000 | In Progress |
+| Mac M3 Pro | 1 | Apple M3 Pro (12 cores) | 8 | 15,000 | Planned |
+
+Narratives are written to disk **incrementally** as each flight completes, preventing data loss from long-running jobs (~36 hours per machine). Total target: **50,000 flights producing ~250M estimated tokens** -- more than doubling the existing corpus.
+
 #### Generation Progress
 
-Running on 24 CPU workers (Dell 7920, 2x Xeon Gold 5118):
+| Machine | Flights | Rate | Landing % | ETA |
+|---------|---------|------|-----------|-----|
+| Dell 7920 (38 workers) | ~500 / 20,000 | 0.2 flights/s | ~96% | ~36 hrs |
+| ROG Ally X (14 workers) | ~370 / 15,000 | 0.1 flights/s | ~95% | ~38 hrs |
+| Mac M3 Pro | -- | -- | -- | Not started |
 
-- **Flights completed:** ~3,740 / 5,000 (75%)
-- **Landing success rate:** 97.8%
-- **Estimated total output:** ~25M tokens
-- **Output directory:** `data/raw/aida_synthetic/`
-
-The ~25M tokens represent a modest ~13% increase in corpus size, but the primary value is in **diversity** -- introducing normal flight operations, instructional text, and pilot communications to a corpus currently dominated by accident investigation reports. This is a first batch; the generation pipeline can scale to 50K+ flights if the quality validates.
+The ~250M tokens will more than double the corpus from 219M to ~469M tokens, and critically shift the composition away from NTSB accident reports toward **normal flight operations, instructional text, pilot communications, and technical data**.
 
 ### Data Expansion: New Sources
 
@@ -419,6 +437,8 @@ FlightMind/
 |-- README.md                          # This file
 |-- requirements.txt                   # Python dependencies
 |-- config.yaml                        # Project configuration
+|-- dashboard.py                       # Real-time monitoring dashboard (web UI)
+|-- ally_status.py                     # ROG Ally status reporter (JSON via SSH)
 |
 |-- model/                             # Model architecture
 |   |-- __init__.py
@@ -428,7 +448,7 @@ FlightMind/
 |
 |-- train/                             # Training pipeline
 |   |-- pretrain.py                    # Pretraining loop
-|   |-- finetune.py                    # LoRA instruction fine-tuning
+|   |-- finetune.py                    # LoRA instruction fine-tuning (--resume support)
 |   |-- dataloader.py                  # Data loading + tokenization
 |   |-- evaluate.py                    # Evaluation + generation
 |   +-- TRAINING.md                    # Training documentation
@@ -437,8 +457,16 @@ FlightMind/
 |   |-- train_tokenizer.py             # Tokenizer training script
 |   +-- tokenizer.json                 # Trained tokenizer (gitignored)
 |
+|-- flightgen-portable/                # Portable flight data generator
+|   |-- generate_flights.py            # Main entry point (scenarios, sim, narration)
+|   |-- flight_dynamics.py             # CPU-only 6-DOF flight simulator (NumPy)
+|   |-- xc_controller.py              # Cross-country controller with triangle intercept
+|   |-- requirements.txt               # Just numpy
+|   +-- README.md                      # Package documentation
+|
 |-- data/
 |   |-- raw/                           # Downloaded source data (gitignored)
+|   |   +-- aida_synthetic/            # Generated flight narratives (5 styles)
 |   |-- cleaned/                       # Processed text (gitignored)
 |   |-- tokenized/                     # Binary token arrays (gitignored)
 |   |-- finetune/                      # AIDA fine-tuning data
@@ -476,11 +504,38 @@ FlightMind/
 
 | Role | Hardware | Notes |
 |------|----------|-------|
-| Data processing + d8 training | Dell 7920 (2x Xeon Gold 5118, 64GB, RTX 4060) | Local development |
+| Data processing + d8 training | Dell 7920 (2x Xeon Gold 5118, 64GB, RTX 4060) | Primary development machine |
 | d24 pretraining | 4x H100 80GB SXM (NVLink) on Vast.ai | ~1 day, ~$200 |
-| d24 LoRA fine-tuning | RTX 4060 8GB (local) | ~20 hrs, $0 |
-| Synthetic data generation | 2x Xeon Gold 5118 (24 workers, local) | CPU-only flight sim |
-| AIDA inference | Same Dell 7920 + RTX 4060 | FlightMind serves AIDA |
+| d24 LoRA fine-tuning | RTX 4060 8GB (Dell 7920) | ~20 hrs, $0 |
+| Flight gen (20K flights) | Dell 7920 (38 CPU workers) | CPU-only flight sim |
+| Flight gen (15K flights) | ROG Ally X (AMD Ryzen Z2 Extreme, 16GB, 14 workers) | Remote via SSH/Tailscale |
+| Flight gen (15K flights) | Mac M3 Pro (12-core ARM, 8 workers) | Planned |
+| AIDA inference | Dell 7920 + RTX 4060 | FlightMind serves AIDA |
+
+All machines are connected via [Tailscale](https://tailscale.com) mesh VPN for SSH access and dashboard monitoring.
+
+## Monitoring Dashboard
+
+A real-time monitoring dashboard (`dashboard.py`) tracks all training and data generation activities across all machines from a single page. It auto-detects the viewing device and serves a responsive layout:
+
+- **Mobile** (< 768px): Compact cards with progress bars and loss chart -- designed for quick status checks from a phone
+- **Desktop**: 2-column grid with hardware specs, prediction cards, rate history charts, cumulative flight charts, and LoRA loss tracking
+
+The dashboard runs on the Dell 7920 and is accessible via Tailscale from any device on the mesh:
+
+```bash
+python dashboard.py
+# Local:     http://localhost:8080
+# Tailscale: http://<tailscale-ip>:8080
+```
+
+**Data sources:**
+- Dell system metrics: `psutil` + `nvidia-smi` (CPU, GPU, RAM, temps)
+- Dell flight gen: file counting in `data/raw/aida_synthetic/`
+- LoRA fine-tuning: log parsing + checkpoint scanning
+- ROG Ally: SSH polling via `ally_status.py` (JSON status reporter)
+
+The dashboard collects data every 30 seconds and maintains a rolling history for trend charts and completion time predictions.
 
 ## Relationship to AIDA
 
@@ -509,6 +564,7 @@ This is an educational project. Every design decision is documented:
 - [Cloud Requirements (d24)](docs/cloud_requirements_d24.md) -- GPU, VRAM, storage, and cost estimates for d24 training
 - [Cloud Requirements (d32)](docs/cloud_requirements_d32.md) -- Same for the larger d32 model
 - [Vast.ai Setup Guide](docs/vastai_setup_guide.md) -- Step-by-step cloud deployment with NCCL fixes and monitoring
+- [Portable Flight Generator](flightgen-portable/README.md) -- Self-contained flight data generation package for distributed execution
 
 ## Acknowledgments
 

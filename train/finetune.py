@@ -413,6 +413,30 @@ def train(args):
     log(f"\nOptimizer: AdamW (lr={args.lr})", logfile)
     log(f"Optimizer memory: ~{n_lora * 12 / 1e6:.1f} MB (vs {total_params * 12 / 1e6:.0f} MB for full fine-tune)", logfile)
 
+    # ---- Resume from LoRA checkpoint ----
+    start_step = 0
+    if args.resume:
+        resume_path = Path(args.resume)
+        if not resume_path.is_absolute():
+            resume_path = PROJECT_ROOT / resume_path
+        log(f"\nResuming from: {resume_path}", logfile)
+        resume_ckpt = torch.load(str(resume_path), map_location=device, weights_only=False)
+
+        # Restore LoRA weights
+        for name, module in model.named_modules():
+            if isinstance(module, LoRALinear) and name in resume_ckpt["lora_state"]:
+                module.lora_A.data.copy_(resume_ckpt["lora_state"][name]["lora_A"])
+                module.lora_B.data.copy_(resume_ckpt["lora_state"][name]["lora_B"])
+
+        # Restore optimizer state
+        if "optimizer" in resume_ckpt:
+            optimizer.load_state_dict(resume_ckpt["optimizer"])
+
+        start_step = resume_ckpt.get("step", 0)
+        best_loss_resumed = resume_ckpt.get("loss", float("inf"))
+        log(f"  Restored LoRA weights + optimizer from step {start_step} (loss {best_loss_resumed:.4f})", logfile)
+        log(f"  Continuing from step {start_step} to {args.max_steps}", logfile)
+
     # ---- Training loop ----
     log(f"\nFine-tuning for {args.max_steps:,} steps...", logfile)
     log(f"Batch size: {args.batch_size}, Grad accum: {args.grad_accum}", logfile)
@@ -431,7 +455,7 @@ def train(args):
     t0 = time.time()
     tokens_processed = 0
 
-    for step in range(args.max_steps):
+    for step in range(start_step, args.max_steps):
         lr = get_lr(step, args.warmup_steps, args.max_steps, args.lr, args.min_lr)
         for param_group in optimizer.param_groups:
             param_group["lr"] = lr
@@ -557,6 +581,10 @@ if __name__ == "__main__":
     # Logging
     parser.add_argument("--log-every", type=int, default=10)
     parser.add_argument("--checkpoint-every", type=int, default=500)
+
+    # Resume
+    parser.add_argument("--resume", type=str, default=None,
+                        help="Resume from a LoRA checkpoint (e.g. checkpoints/finetune_step_1000.pt)")
 
     # Device
     parser.add_argument("--device", type=str,
