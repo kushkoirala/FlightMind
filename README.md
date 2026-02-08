@@ -28,7 +28,7 @@ The model architecture is inspired by Andrej Karpathy's [nanochat](https://githu
 
 | Milestone | Status | Details |
 |-----------|--------|---------|
-| Data collection | Done | 192M aviation tokens from 8 sources |
+| Data collection | Done | 192M+ aviation tokens from 12+ sources |
 | Data cleaning pipeline | Done | 157K docs cleaned and validated |
 | Custom BPE tokenizer | Done | 32K vocab trained on aviation + general text |
 | Model architecture | Done | Transformer with RoPE, SwiGLU, RMSNorm, Flash Attention |
@@ -56,12 +56,17 @@ General aviation knowledge from public sources -- the model learns to "speak avi
 |--------|-----------|--------|---------|
 | NTSB accident reports | 92,000+ | 135M | Investigation narratives, probable cause |
 | METAR weather observations | 22,000+ | 33M | Real weather data from US airports |
+| Wikipedia aviation articles | 9,600+ | 19.5M | Aircraft, airports, aviation concepts |
 | HuggingFace aviation dataset | 15,000+ | 15M | Curated aviation text |
-| Wikipedia aviation articles | 9,600+ | 20M | Aircraft, airports, aviation concepts |
-| 14 CFR regulations | 900+ | 2.7M | Federal aviation regulations |
-| FAA handbooks | 7 | 2.7M | PHAK, AFH, IFH, weight & balance |
+| Aviation StackExchange | 2,500 | 2.6M | Expert Q&A on regulations, procedures, aerodynamics |
+| 14 CFR regulations | 900+ | 2.6M | Federal aviation regulations |
+| FAA handbooks | 10 | 2.7M | PHAK, AFH, IFH, weight & balance |
+| FAA Advisory Circulars | 10 | 675K | Icing, weather, stall/spin, non-towered ops, SMS |
+| ATC transcripts | 39,000+ | 590K | Real radio communications (ATCO2, ATCSim, UWB-ATCC) |
 | OpenAP aircraft performance | 7,400+ | 3M | Aircraft specs, performance models |
-| **Total** | **157,118** | **~192M** | |
+| SKYbrary | 4,600+ | ~4M | Safety articles, accident case studies (EUROCONTROL) |
+| NASA Technical Reports | 294 | 78K | Research abstracts: aerodynamics, safety, ATC |
+| **Total** | **~195,000** | **~219M** | |
 
 ### Phase 2: AIDA Flight Data (Fine-tuning)
 
@@ -123,7 +128,7 @@ See [ARCHITECTURE.md](model/ARCHITECTURE.md) and [TRAINING.md](train/TRAINING.md
 ### Training Pipeline
 
 ```
-Aviation corpus (192M tokens, local)  +  FineWeb-EDU (~1.3T tokens, streamed)
+Aviation corpus (219M tokens, 12+ sources)  +  FineWeb-EDU (~1.3T tokens, streamed)
   --> BPE tokenize (32K vocab)
   --> Pack into 2048-token sequences (50% aviation / 50% general)
   --> Multi-GPU DDP pretrain on 4x H100 (AdamW, cosine LR, bfloat16)
@@ -311,14 +316,14 @@ The fine-tuning dataset uses a chat template format with system, user, and assis
 | 0 | 4.475 | 2.0e-6 | 7.85 | 49 tok/s |
 | 10 | 3.813 | 2.2e-5 | 6.78 | 55 tok/s |
 | 20 | 2.043 | 4.2e-5 | 4.90 | 55 tok/s |
-| 30 | 0.859 | 6.2e-5 | 3.47 | 56 tok/s |
-| 40 | 0.567 | 8.2e-5 | 2.99 | 56 tok/s |
-| 60 | 0.415 | 1.2e-4 | 2.83 | 56 tok/s |
-| 80 | 0.960 | 1.6e-4 | 2.73 | 57 tok/s |
+| 50 | 1.624 | 1.0e-4 | 3.64 | 56 tok/s |
 | 100 | 0.217 | 2.0e-4 | 1.27 | 57 tok/s |
-| 110 | 0.115 | 2.0e-4 | 1.15 | 57 tok/s |
+| 150 | 0.278 | 2.0e-4 | 1.44 | 57 tok/s |
+| 200 | 0.128 | 1.99e-4 | 0.61 | 57 tok/s |
+| 220 | 0.061 | 1.98e-4 | 0.57 | 57 tok/s |
+| 230 | 0.196 | 1.98e-4 | 0.79 | 57 tok/s |
 
-Loss dropped from 4.47 to 0.12 in 110 steps -- the model is rapidly learning the instruction format. Grad norm is decreasing steadily, indicating stable convergence. Training is still in the early phase with ~1,890 steps remaining (~19 hours).
+Loss dropped from 4.47 to ~0.1 in 230 steps -- the model has learned the instruction format and is converging. Grad norm has stabilized below 1.0, indicating stable optimization. Training continues with ~1,770 steps remaining (~16 hours).
 
 ### Synthetic Aviation Data Generation -- In Progress
 
@@ -349,12 +354,29 @@ Each completed flight is then converted into **5 narrative styles**:
 
 Running on 24 CPU workers (Dell 7920, 2x Xeon Gold 5118):
 
-- **Flights completed:** ~3,140 / 5,000 (63%)
-- **Landing success rate:** 97.7%
+- **Flights completed:** ~3,740 / 5,000 (75%)
+- **Landing success rate:** 97.8%
 - **Estimated total output:** ~25M tokens
 - **Output directory:** `data/raw/aida_synthetic/`
 
 The ~25M tokens represent a modest ~13% increase in corpus size, but the primary value is in **diversity** -- introducing normal flight operations, instructional text, and pilot communications to a corpus currently dominated by accident investigation reports. This is a first batch; the generation pipeline can scale to 50K+ flights if the quality validates.
+
+### Data Expansion: New Sources
+
+To address the data scarcity problem (108M aviation tokens repeated ~29x during pretraining), we expanded the corpus with automated collection from additional public sources:
+
+| Source | Method | Documents | Est. Tokens | Notes |
+|--------|--------|-----------|-------------|-------|
+| Aviation StackExchange | Stack Exchange API | 2,500 Q&As | 2.6M | Expert answers on regulations, aerodynamics, procedures |
+| FAA Advisory Circulars | FAA.gov PDF download | 10 ACs | 675K | Icing (91-74B), weather (00-6B), SMS (120-92B), inspection (43.13-1B) |
+| ATC Transcripts | HuggingFace datasets | 39,318 utterances | 590K | ATCO2, ATCSim, UWB-ATCC radio communications |
+| SKYbrary | Sitemap crawl + HTML extraction | 4,632 articles | ~4M (est) | EUROCONTROL aviation safety knowledge base |
+| NASA NTRS | NTRS search API | 294 reports | 78K | Technical report abstracts on aviation research |
+| **ASRS** | **Manual download required** | **--** | **--** | **NASA safety reports: no public API, CSV export only** |
+
+**Total new tokens: ~8M** (plus ~4M SKYbrary in progress). These complement the existing 192M-token corpus by adding **expert Q&A, regulatory guidance, real ATC phraseology, and international safety knowledge** -- content types that were previously underrepresented.
+
+All collection scripts are in `scripts/collect/` and follow a consistent pattern: download, extract text, save manifest with token counts.
 
 ## Quick Start
 
@@ -427,6 +449,14 @@ FlightMind/
 |
 |-- scripts/
 |   |-- collect/                       # Data collection scripts
+|   |   |-- collect_stackexchange.py   # Aviation StackExchange Q&A
+|   |   |-- collect_skybrary.py        # SKYbrary safety articles
+|   |   |-- collect_nasa_ntrs.py       # NASA Technical Reports
+|   |   |-- collect_faa_acs.py         # FAA Advisory Circulars
+|   |   |-- collect_faa_handbooks.py   # FAA handbooks (PHAK, AFH, etc.)
+|   |   |-- collect_ntsb.py            # NTSB accident reports
+|   |   |-- collect_metar.py           # METAR weather observations
+|   |   +-- collect_wikipedia.py       # Wikipedia aviation articles
 |   |-- process/                       # Data cleaning scripts
 |   |-- launch_finetune.ps1            # Download monitor + finetune launcher
 |   +-- run_finetune_v2.ps1            # Optimized LoRA fine-tuning launcher
@@ -484,7 +514,9 @@ This is an educational project. Every design decision is documented:
 
 - [Andrej Karpathy](https://github.com/karpathy) -- nanochat, nanoGPT, llm.c (architecture inspiration)
 - [HuggingFace](https://huggingface.co) -- tokenizers library, FineWeb-EDU, datasets
-- FAA, NTSB, NASA -- public aviation data
+- FAA, NTSB, NASA -- public aviation data (handbooks, ACs, accident reports, NTRS)
+- [SKYbrary](https://skybrary.aero) (EUROCONTROL) -- aviation safety knowledge base
+- [Aviation StackExchange](https://aviation.stackexchange.com) -- community expert Q&A
 - [OpenAP](https://openap.dev) (TU Delft) -- aircraft performance models
 
 ## License
