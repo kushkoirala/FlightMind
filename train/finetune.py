@@ -120,9 +120,10 @@ class LoRALinear(nn.Module):
         if original.bias is not None:
             original.bias.requires_grad = False
 
-        # LoRA matrices
-        self.lora_A = nn.Parameter(torch.randn(rank, d_in) * (1.0 / rank))
-        self.lora_B = nn.Parameter(torch.zeros(d_out, rank))
+        # LoRA matrices (on same device as original weights)
+        device = original.weight.device
+        self.lora_A = nn.Parameter(torch.randn(rank, d_in, device=device) * (1.0 / rank))
+        self.lora_B = nn.Parameter(torch.zeros(d_out, rank, device=device))
 
     def forward(self, x):
         # Original frozen forward pass + low-rank update
@@ -154,7 +155,7 @@ def apply_lora(model: FlightMind, rank: int = 16, alpha: float = 32.0) -> dict:
     for name, module in model.named_modules():
         # Target: attention projections and MLP projections
         if isinstance(module, nn.Linear) and any(
-            target in name for target in ["wq", "wk", "wv", "wo", "w1", "w2", "w3"]
+            target in name for target in ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
         ):
             # Get parent module and attribute name
             parts = name.rsplit(".", 1)
@@ -442,7 +443,7 @@ def train(args):
             input_ids, targets, loss_mask = dataset.get_batch(args.batch_size, device)
 
             with torch.amp.autocast(device_type=device.split(":")[0], dtype=dtype, enabled=dtype != torch.float32):
-                logits, _ = model(input_ids)
+                logits, _ = model(input_ids, targets=targets)
 
                 # Compute masked loss (only on assistant tokens)
                 loss_all = F.cross_entropy(

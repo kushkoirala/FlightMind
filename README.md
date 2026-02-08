@@ -24,7 +24,7 @@ The model architecture is inspired by Andrej Karpathy's [nanochat](https://githu
 
 ## Project Status
 
-**Phase: d24 cloud pretraining in progress**
+**Phase: LoRA instruction fine-tuning in progress**
 
 | Milestone | Status | Details |
 |-----------|--------|---------|
@@ -36,9 +36,10 @@ The model architecture is inspired by Andrej Karpathy's [nanochat](https://githu
 | Evaluation suite | Done | Perplexity, sample generation, domain probing |
 | d8 pretraining (50M) | Done | Perplexity 8.12, 71 tok/s generation on RTX 4060 |
 | AIDA fine-tuning data pipeline | Done | 303K instruction pairs from real flights |
-| **d24 cloud pretraining (956M)** | **In Progress** | **4x H100 SXM on Vast.ai, ~$506 est.** |
+| d24 cloud pretraining (956M) | Done | 4x H100 SXM on Vast.ai, best val_loss 1.827 at step 4,000 |
+| **Instruction fine-tuning (LoRA)** | **In Progress** | **Rank-16 LoRA on RTX 4060, 13.6M trainable params** |
+| **Synthetic flight data generation** | **In Progress** | **5,000 AIDA flights, ~25M tokens, 5 narrative styles** |
 | d32 cloud pretraining (2.2B) | Planned | 4-8x H100 SXM, ~$1,240 est. |
-| Instruction fine-tuning | Planned | LoRA on 303K AIDA instruction pairs |
 | AIDA integration | Planned | Drop-in replacement for Llama 8B |
 
 ## The Closed-Loop Data Pipeline
@@ -124,14 +125,19 @@ See [ARCHITECTURE.md](model/ARCHITECTURE.md) and [TRAINING.md](train/TRAINING.md
 ```
 Aviation corpus (192M tokens, local)  +  FineWeb-EDU (~1.3T tokens, streamed)
   --> BPE tokenize (32K vocab)
-  --> Pack into 2048-token sequences (30% aviation / 70% general)
+  --> Pack into 2048-token sequences (50% aviation / 50% general)
   --> Multi-GPU DDP pretrain on 4x H100 (AdamW, cosine LR, bfloat16)
-  --> Evaluate (perplexity + generation)
+  --> Best checkpoint at step 4,000 (val_loss 1.827)
 
 AIDA flight data (303K instruction pairs)
-  --> Instruction fine-tuning (LoRA, chat format)
+  --> LoRA instruction fine-tuning (rank 16, RTX 4060)  <-- IN PROGRESS
   --> Evaluate on command parsing accuracy
   --> Deploy to AIDA
+
+AIDA flight simulator (5,000 headless flights)
+  --> 5 narrative styles per flight  <-- IN PROGRESS
+  --> ~25M new tokens of physics-grounded aviation text
+  --> Re-tokenize and integrate into pretraining corpus
 ```
 
 ### Inference on AIDA Hardware
@@ -176,7 +182,7 @@ For reference, GPT-2 (124M params) achieves perplexity ~29 on general web text. 
   <img src="docs/figures/training_dashboard.png" alt="Training Metrics Dashboard" width="700"/>
 </p>
 
-### d24 (956M params) -- In Progress
+### d24 (956M params) -- Pretraining Complete, Fine-tuning In Progress
 
 Scaling to production size on Vast.ai cloud GPUs. The d24 model is 19x larger than d8, requiring multi-GPU training with DistributedDataParallel (DDP) across NVLink-connected H100s.
 
@@ -194,7 +200,7 @@ Scaling to production size on Vast.ai cloud GPUs. The d24 model is 19x larger th
 | **Effective batch** | 524K tokens/step | 8 micro-batches x 8 grad accum steps x 4 GPUs x 2047 tokens |
 | **Learning rate** | 6e-4 peak, cosine decay to 6e-5 | Standard for ~1B models; 500-step linear warmup |
 | **Total steps** | 95,000 | ~50B token-presentations (Chinchilla-optimal for 956M params) |
-| **Data mix** | 30% aviation (local) / 70% FineWeb-EDU (streamed) | Aviation tokens packed locally; general data streamed from HuggingFace |
+| **Data mix** | 50% aviation / 50% FineWeb-EDU (final config) | Started at 70/30, pivoted to 50/50 after analysis |
 | **Throughput** | ~175K tok/s | ~3.0 sec/step across 4 GPUs |
 | **Wall-clock time** | ~79 hours (~3.3 days) | Including FineWeb stream init (~15s) |
 | **Estimated cost** | ~$506 | 79h x $6.40/hr |
@@ -203,7 +209,7 @@ Scaling to production size on Vast.ai cloud GPUs. The d24 model is 19x larger th
 
 With only 108M tokens stored locally (aviation corpus), training for 95K steps at 524K tokens/step would repeat the data ~460 times -- far too much repetition. Instead, we stream the general-domain portion (70% of each batch) directly from HuggingFace's FineWeb-EDU dataset (~1.3T tokens of high-quality educational web text).
 
-Each micro-batch is split: **2 sequences from local aviation data + 6 sequences from FineWeb-EDU** = 8 total. The streamer tokenizes and packs documents on-the-fly with the same BPE tokenizer used for the aviation corpus. In DDP mode, each GPU gets a different shard of the stream so no data is duplicated.
+Each micro-batch is split: **4 sequences from local aviation data + 4 sequences from FineWeb-EDU** = 8 total (50/50 split; originally 2+6 before the ratio pivot). The streamer tokenizes and packs documents on-the-fly with the same BPE tokenizer used for the aviation corpus. In DDP mode, each GPU gets a different shard of the stream so no data is duplicated.
 
 #### Multi-GPU Setup: What We Learned
 
@@ -221,6 +227,134 @@ Each micro-batch is split: **2 sequences from local aviation data + 6 sequences 
 | 30 | 7.81 | 175K tok/s | Steady convergence |
 | 40 | 7.14 | 175K tok/s | Still in LR warmup |
 | 50 | 6.80 | 175K tok/s | Loss dropping well |
+
+#### Data Mix Pivot: 70/30 to 50/50
+
+The initial training plan used a **70% FineWeb-EDU / 30% aviation** data mix. However, analysis of early checkpoints revealed the model was developing strong general language skills but underperforming on domain-specific aviation knowledge. We pivoted to a **50/50** split to strengthen aviation specialization:
+
+```
+Before: 2 aviation + 6 FineWeb = 8 sequences/micro-batch (30% aviation)
+After:  4 aviation + 4 FineWeb = 8 sequences/micro-batch (50% aviation)
+```
+
+Training resumed from the best checkpoint at step 3,501 with the new ratio.
+
+#### Overfitting and Early Stopping
+
+By step ~9,800, validation loss was steadily diverging from training loss -- a textbook sign of overfitting:
+
+| Eval Step | Val Loss | Delta from Best |
+|-----------|----------|-----------------|
+| 4,000 | **1.827** | -- (best) |
+| 4,500 | 1.831 | +0.004 |
+| 5,000 | 1.944 | +0.117 |
+| 5,500 | 1.993 | +0.166 |
+| 6,000 | 2.143 | +0.316 |
+| 6,500 | 2.199 | +0.372 |
+| 7,000 | 2.332 | +0.505 |
+| 7,500 | 2.509 | +0.682 |
+| 8,000 | 2.460 | +0.633 |
+| 8,500 | 2.657 | +0.830 |
+| 9,000 | 2.667 | +0.840 |
+| 9,500 | **2.974** | **+1.147** |
+
+**Root cause:** The 108M-token aviation corpus was being repeated ~29 times by step 9,800. The model memorized the training set while generalizing poorly. The best checkpoint was saved at **step 4,000 (val_loss 1.827)** -- everything after was wasted compute.
+
+**Lesson learned:** For a domain corpus this small relative to model capacity, more training steps just means more memorization. The data is the bottleneck, not the compute. This directly motivated the synthetic data generation effort (see below).
+
+The Vast.ai instance (4x H100 SXM) was stopped after training completed. The best checkpoint (10.69 GB) was downloaded to local storage for fine-tuning.
+
+#### Actual Cloud Training Cost
+
+| Item | Hours | Rate | Cost |
+|------|-------|------|------|
+| 4x H100 SXM (Vast.ai) | ~30 | $6.54/hr | ~$200 |
+
+The instance was active for about a day total, covering both the initial 70/30 run (steps 0-3,500) and the 50/50 continuation (steps 3,501-9,900).
+
+### d24 LoRA Instruction Fine-tuning -- In Progress
+
+With the pretrained d24 checkpoint (val_loss 1.827), we moved to instruction fine-tuning using LoRA (Low-Rank Adaptation) on the local RTX 4060. LoRA freezes the base model weights and trains small rank-decomposition matrices inserted into each linear layer -- drastically reducing memory and compute requirements.
+
+#### LoRA Configuration
+
+| Parameter | Value | Rationale |
+|-----------|-------|-----------|
+| **Base model** | d24 best.pt (956M params) | Best pretrained checkpoint (step 4,000) |
+| **LoRA rank** | 16 | Good balance of expressiveness vs efficiency |
+| **LoRA alpha** | 32 | Alpha/rank = 2 scaling factor |
+| **Target layers** | All linear layers (168 total) | q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj x 24 layers |
+| **Trainable params** | 13,565,952 (1.42% of total) | 70x fewer params than full fine-tuning |
+| **Optimizer memory** | ~163 MB | vs 11.5 GB for full fine-tuning |
+| **Hardware** | RTX 4060 (8 GB VRAM) | 7.8 GB used, fits in consumer GPU |
+| **Batch size** | 2 (effective 4 with grad_accum=2) | VRAM-limited |
+| **Learning rate** | 2e-4, cosine decay to 2e-5 | 100-step warmup |
+| **Max steps** | 2,000 | ~20 hours on RTX 4060 |
+| **Sequence length** | 512 tokens | Instruction pairs are short |
+| **Loss masking** | Assistant tokens only | Only learn to generate responses, not repeat prompts |
+
+#### Instruction Data
+
+The fine-tuning dataset uses a chat template format with system, user, and assistant roles:
+
+| Source | Examples | Content |
+|--------|----------|---------|
+| AIDA intent observations | 244,228 | Real command/action pairs from flight sim |
+| Synthetic command variations | 55,000 | Heading, altitude, speed, landing, weather, emergency |
+| XC flight telemetry | 3,945 | Status narration + phase transitions |
+| **Total** | **303,173** | |
+
+#### Fine-tuning Progress
+
+| Step | Loss | LR | Grad Norm | Throughput |
+|------|------|----|-----------|------------|
+| 0 | 4.475 | 2.0e-6 | 7.85 | 49 tok/s |
+| 10 | 3.813 | 2.2e-5 | 6.78 | 55 tok/s |
+| 20 | 2.043 | 4.2e-5 | 4.90 | 55 tok/s |
+| 30 | 0.859 | 6.2e-5 | 3.47 | 56 tok/s |
+| 40 | 0.567 | 8.2e-5 | 2.99 | 56 tok/s |
+| 60 | 0.415 | 1.2e-4 | 2.83 | 56 tok/s |
+| 80 | 0.960 | 1.6e-4 | 2.73 | 57 tok/s |
+| 100 | 0.217 | 2.0e-4 | 1.27 | 57 tok/s |
+| 110 | 0.115 | 2.0e-4 | 1.15 | 57 tok/s |
+
+Loss dropped from 4.47 to 0.12 in 110 steps -- the model is rapidly learning the instruction format. Grad norm is decreasing steadily, indicating stable convergence. Training is still in the early phase with ~1,890 steps remaining (~19 hours).
+
+### Synthetic Aviation Data Generation -- In Progress
+
+The overfitting analysis pointed to limited data diversity as a contributing factor. The current corpus is ~70% NTSB accident reports, which skews the model's language toward investigation narratives. To introduce more variety -- particularly normal flight operations -- we're generating a synthetic corpus using AIDA's flight simulator.
+
+#### Approach
+
+5,000 headless flights are simulated across 11 Kansas airports (90 possible origin/destination pairs) using AIDA's `FlightSimulator` and `GeneralizedXCController`. Each flight uses randomized parameters:
+
+- **Cruise altitude**: 3,000-8,000 ft in 500 ft increments
+- **Wind**: Random heading (0-360) + speed (0-25 kts)
+- **Deviations**: 15% of flights include altitude changes, heading deviations, or go-arounds
+- **Weather**: VFR clear, marginal VFR, scattered clouds, overcast
+
+Each completed flight is then converted into **5 narrative styles**:
+
+| Style | Description | Tokens/flight |
+|-------|-------------|---------------|
+| **Flight Report** | NTSB-style narrative for normal operations | ~1,500 |
+| **Instructional** | Textbook cross-country planning prose | ~1,200 |
+| **Pilot Log** | First-person pilot notes and entries | ~800 |
+| **ATC Communications** | Simulated radio exchange transcripts | ~500 |
+| **Technical Parameter Log** | Timestamped telemetry data | ~1,000 |
+
+**Key advantage:** The text is **physics-grounded** -- altitudes, airspeeds, headings, and distances come from actual simulated flight dynamics, not hallucinated by a language model. Every number in the generated text corresponds to a real computed value.
+
+#### Generation Progress
+
+Running on 24 CPU workers (Dell 7920, 2x Xeon Gold 5118):
+
+- **Flights completed:** ~3,140 / 5,000 (63%)
+- **Landing success rate:** 97.7%
+- **Estimated total output:** ~25M tokens
+- **Output directory:** `data/raw/aida_synthetic/`
+
+The ~25M tokens represent a modest ~13% increase in corpus size, but the primary value is in **diversity** -- introducing normal flight operations, instructional text, and pilot communications to a corpus currently dominated by accident investigation reports. This is a first batch; the generation pipeline can scale to 50K+ flights if the quality validates.
 
 ## Quick Start
 
@@ -293,7 +427,9 @@ FlightMind/
 |
 |-- scripts/
 |   |-- collect/                       # Data collection scripts
-|   +-- process/                       # Data cleaning scripts
+|   |-- process/                       # Data cleaning scripts
+|   |-- launch_finetune.ps1            # Download monitor + finetune launcher
+|   +-- run_finetune_v2.ps1            # Optimized LoRA fine-tuning launcher
 |
 |-- docs/
 |   |-- cloud_requirements_d24.md      # d24 cloud training specs
@@ -311,7 +447,9 @@ FlightMind/
 | Role | Hardware | Notes |
 |------|----------|-------|
 | Data processing + d8 training | Dell 7920 (2x Xeon Gold 5118, 64GB, RTX 4060) | Local development |
-| d24/d32 pretraining | 4x H100 80GB SXM (NVLink) on Vast.ai | Cloud GPU rental, DDP |
+| d24 pretraining | 4x H100 80GB SXM (NVLink) on Vast.ai | ~1 day, ~$200 |
+| d24 LoRA fine-tuning | RTX 4060 8GB (local) | ~20 hrs, $0 |
+| Synthetic data generation | 2x Xeon Gold 5118 (24 workers, local) | CPU-only flight sim |
 | AIDA inference | Same Dell 7920 + RTX 4060 | FlightMind serves AIDA |
 
 ## Relationship to AIDA
