@@ -1,0 +1,61 @@
+# Data (too large for git)
+data/raw/
+data/cleaned/
+data/tokenized/
+data/splits/
+data/finetune/
+
+# Tokenizer output (regenerate with scripts/train_tokenizer.py)
+tokenizer/*.json
+!tokenizer/.gitkeep
+
+# Model checkpoints
+*.pt
+*.bin
+*.safetensors
+checkpoints/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.eggs/
+dist/
+build/
+*.egg
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log
+wandb/
+runs/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Temp
+*.tmp
+*.bak
+setup_dirs.ps1
+check_*.ps1
+count_*.ps1
+list_*.ps1
+rename.ps1
+
+# Portable flight gen output and archives
+flightgen-portable.zip
+flightgen-portable/output/
